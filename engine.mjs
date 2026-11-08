@@ -87,6 +87,14 @@ export function freshSession() {
 export const routeFor=s=>s.schemeSnapshot?customRoute(s):route(s.answers);
 export const evaluationFor=s=>s.schemeSnapshot?customEvaluation(s):evaluation(s.answers);
 export const answerFor=(s,key,value)=>s.schemeSnapshot?customAnswer(s,key,value):answer(s,key,value);
+export function answerAndAdvance(session,key,value){
+  if(session.decisionSnapshot)throw new Error('Путь уже зафиксирован');
+  const r=routeFor(session),index=r.steps.findIndex(q=>q.key===key);
+  if(index<0||!r.steps[index].options.some(o=>o.value===value))throw new Error('Недопустимый ответ');
+  // Repeating an unchanged answer after Back keeps the already valid downstream path.
+  const updated=session.answers[key]===value?{...session,answers:{...session.answers}}:answerFor(session,key,value);
+  return {...updated,cursor:index+1,updatedAt:new Date().toISOString()};
+}
 export const scenarioFor=s=>s.schemeSnapshot?s.schemeSnapshot.name:scenario(s.decisionSnapshot?.answers||s.answers);
 export function freshSchemeSession(scheme){
   const checked=inspectScheme(scheme);if(!checked.valid)throw new Error(checked.errors[0]);

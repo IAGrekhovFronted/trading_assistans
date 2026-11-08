@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 const root=path.dirname(fileURLToPath(import.meta.url));
 const port=Number(process.argv.find(v=>v.startsWith('--port='))?.split('=')[1]||4666);
-const allowed=new Set(['index.html','styles.css','app.mjs','engine.mjs','storage.mjs','schemes.mjs','builder.mjs']);
+const allowed=new Set(['index.html','styles.css','app.mjs','engine.mjs','storage.mjs','schemes.mjs','builder.mjs','examples.mjs','hint-images.mjs','image-drop.mjs','scheme-map.mjs','journal.mjs']);
 const types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.mjs':'text/javascript; charset=utf-8'};
 const server=http.createServer(async(req,res)=>{
   const url=new URL(req.url,'http://127.0.0.1');

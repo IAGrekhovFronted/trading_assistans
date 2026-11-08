@@ -1,3 +1,4 @@
+import {assertHintImage,assertImageGallery} from './hint-images.mjs';
 export const SCHEME_FORMAT='entry-navigator/schemes-v1';
 export const RESULT_KINDS={matched:'Условия отмечены',waiting:'Ожидание',unclear:'Неясная ситуация'};
 const uid=()=>crypto.randomUUID();
@@ -42,10 +43,12 @@ export function assertSchemeShape(s){
   for(const n of s.nodes){
     if(!n||!id(n.id)||ids.has(n.id)||!['question','result'].includes(n.type)||!text(n.title,500))throw new Error('Некорректный блок схемы');
     ids.add(n.id);
+    if(n.hintImage!==undefined){if(n.type!=='question')throw new Error('Скриншот подсказки доступен только для вопроса');assertHintImage(n.hintImage);}
+    if(n.hintImages!==undefined){if(n.type!=='question')throw new Error('Галерея подсказки доступна только для вопроса');assertImageGallery(n.hintImages);}
     if(n.type==='result'){if(!Object.hasOwn(RESULT_KINDS,n.kind)||!text(n.description,5000))throw new Error('Некорректный итог схемы');}
     else{
       if(!text(n.hint,5000)||!Array.isArray(n.options)||n.options.length>100)throw new Error('Некорректные варианты ответа');
-      const opts=new Set();for(const o of n.options){if(!o||!id(o.id)||opts.has(o.id)||!text(o.label,300)||!(o.next===''||id(o.next)))throw new Error('Некорректный переход схемы');opts.add(o.id);}
+      const opts=new Set();for(const o of n.options){if(!o||!id(o.id)||opts.has(o.id)||!text(o.label,300)||!(o.next===''||id(o.next)))throw new Error('Некорректный переход схемы');if(o.exampleImage!==undefined)assertHintImage(o.exampleImage);if(o.exampleImages!==undefined)assertImageGallery(o.exampleImages);opts.add(o.id);}
     }
   }
   return s;
@@ -83,7 +86,7 @@ export function customRoute(s){
     if(seen.has(id))throw new Error('В схеме обнаружен цикл');seen.add(id);
     const n=byId.get(id);if(!n)throw new Error('В схеме потерян переход');
     if(n.type==='result')return {steps,end:n.id,result:n,complete:true};
-    steps.push({key:n.id,title:n.title,eyebrow:scheme.name,hint:n.hint,options:n.options.map(o=>({value:o.id,label:o.label,detail:'',icon:'→'}))});
+    steps.push({key:n.id,title:n.title,eyebrow:scheme.name,hint:n.hint,hintImage:n.hintImage,hintImages:n.hintImages,options:n.options.map(o=>({value:o.id,label:o.label,detail:'',icon:'→',exampleImage:o.exampleImage,exampleImages:o.exampleImages}))});
     const selected=n.options.find(o=>o.id===s.answers[n.id]);
     if(!selected)return {steps,end:null,complete:false};id=selected.next;
   }

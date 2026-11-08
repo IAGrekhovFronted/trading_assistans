@@ -1,6 +1,10 @@
+import {renderSchemeMap} from './scheme-map.mjs';
 import {newScheme,templateScheme,newQuestion,newResult,newOption,duplicateScheme,inspectScheme,schemeStatus,withSchemeStatus,RESULT_KINDS} from './schemes.mjs';
 
-export function createBuilder({getSchemes,save,persist=async()=>true,remove,run,render,notify,esc}){
+import {assertHintImage,readHintImageFile,validateHintFile,imageGallery,setImageGallery,MAX_SCHEME_IMAGES} from './hint-images.mjs';
+
+export function createBuilder({getSchemes,save,persist=async()=>true,remove,run,render,notify,esc,showImage=()=>{},readImage=readHintImageFile}){
+  const uploads=new Map(),imageQueues=new Map();
   let editId=null,nodeId=null,nextRevision=null,showErrors=false,libraryFilter='all';
   const current=()=>getSchemes().find(s=>s.id===editId);
   const node=()=>current()?.nodes.find(n=>n.id===nodeId);
@@ -35,29 +39,80 @@ export function createBuilder({getSchemes,save,persist=async()=>true,remove,run,
     '<div class="builder-workspace"><aside class="card builder-blocks"><div class="builder-blocks-head"><h3>Блоки <span>'+s.nodes.length+'</span></h3><small>Порядок задают переходы</small></div><div class="builder-node-list">'+s.nodes.map((q,i)=>'<button class="builder-node '+(q.id===nodeId?'selected':'')+'" data-builder-action="select-node" data-id="'+q.id+'"><span class="builder-node-number '+q.type+'">'+(q.type==='result'?'◎':i+1)+'</span><span><strong data-node-label="'+q.id+'">'+esc(q.title||'Без названия')+'</strong><small>'+(q.id===s.startId?'Старт · ':'')+(q.type==='result'?RESULT_KINDS[q.kind]:'Вопрос · '+q.options.length+' ответа')+'</small></span></button>').join('')+'</div><div class="builder-add">'+button('add-question','＋ Вопрос')+button('add-result','＋ Итог')+'</div></aside><section class="card builder-node-editor">'+(n?nodeEditor(s,n):'<div class="empty"><h3>Добавь первый блок</h3><p>Начни с вопроса, затем создай итог и настрой переход.</p></div>')+'</section></div>'+
     '<section class="card builder-graph"><div class="scheme-header"><div><h2>Карта переходов</h2><p>Нажми на блок, чтобы изменить его. Карта обновляется при редактировании.</p></div><span class="pill neutral">Автоматическая раскладка</span></div><div class="builder-map" id="builder-map">'+graph(s)+'</div></section><div class="builder-footer"><small>Автосохранение включено. «Сохранить черновик» сохраняет работу и возвращает в библиотеку.</small></div>';
   }
+  const imageFields=answer=>answer?['exampleImages','exampleImage']:['hintImages','hintImage'];
+  function mediaEditor(target,answer,index){
+    const [plural,legacy]=imageFields(answer),images=imageGallery(target,plural,legacy),kind=answer?'answer':'hint';
+    const label=answer?'ответу '+(index+1):'подсказке',extra=answer?'data-id="'+esc(target.id)+'"':'';
+    return '<div class="hint-media-editor '+(answer?'answer-media-editor ':'')+'image-drop-zone" data-image-drop="'+kind+'" '+(answer?'data-option-id="'+esc(target.id)+'"':'')+' data-max-files="'+MAX_SCHEME_IMAGES+'" role="group" aria-label="Картинки к '+label+'"><div class="hint-media-toolbar"><span>Примеры · '+images.length+' / '+MAX_SCHEME_IMAGES+'</span>'+button('choose-'+kind+'-image','＋ Добавить картинки','secondary',extra+' aria-label="Добавить картинки к '+label+'" '+(images.length>=MAX_SCHEME_IMAGES?'disabled':''))+'</div><input '+(answer?'data-answer-image-file data-option-id="'+esc(target.id)+'"':'id="hint-image-file"')+' type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" hidden aria-label="Картинки к '+label+'">'+
+    '<div class="scheme-image-gallery">'+images.map((image,i)=>'<div class="hint-image-preview"><button class="hint-image-open" data-builder-action="open-'+kind+'-image" '+extra+' data-image-id="'+esc(image.id)+'" aria-label="Увеличить картинку '+(i+1)+' к '+label+'"><img src="'+esc(image.data)+'" alt="Пример '+(i+1)+' к '+label+'"></button><div class="hint-image-meta"><span>'+esc(image.name)+'</span></div><div class="scheme-image-actions">'+button('choose-'+kind+'-image','Заменить','secondary',extra+' data-image-id="'+esc(image.id)+'" aria-label="Заменить картинку '+(i+1)+' к '+label+'"')+button('remove-'+kind+'-image','Удалить','text-button danger',extra+' data-image-id="'+esc(image.id)+'" aria-label="Удалить картинку '+(i+1)+' к '+label+'"')+'</div></div>').join('')+'</div>'+
+    '<p class="image-drop-instruction"><span class="drop-idle">Перетащи одну или несколько картинок сюда · до '+MAX_SCHEME_IMAGES+' файлов по 5 МБ</span><span class="drop-active">Отпусти файлы, чтобы добавить картинки</span></p></div>';
+  }
+  const hintMedia=n=>mediaEditor(n,false);
+  const answerMedia=(o,i)=>mediaEditor(o,true,i);
+  const attachHintImage=file=>attachHintImages(file?[file]:[]);
+  const attachAnswerImage=(file,optionId)=>attachAnswerImages(file?[file]:[],optionId);
+  const attachHintImages=(files,replaceId)=>attachImages(files,undefined,replaceId);
+  const attachAnswerImages=(files,optionId,replaceId)=>{
+    if(typeof optionId!=='string')throw new Error('Выбери ответ для примеров');
+    return attachImages(files,optionId,replaceId);
+  };
+  async function attachImages(fileList,optionId,replaceId){
+    const files=Array.from(fileList||[]);if(!files.length)return;
+    const owner=current(),question=node(),answer=optionId!==undefined;
+    if(!owner||question?.type!=='question')throw new Error('Выбери вопрос для картинок');
+    const target=answer?question.options.find(o=>o.id===optionId):question;
+    if(!target)throw new Error('Ответ уже удалён. Примеры не прикреплены.');
+    const [plural,legacy]=imageFields(answer),existing=imageGallery(target,plural,legacy);
+    if(replaceId&&(!existing.some(i=>i.id===replaceId)||files.length!==1))throw new Error('Для замены выбери одну картинку');
+    if(!replaceId&&existing.length+files.length>MAX_SCHEME_IMAGES)throw new Error('Можно прикрепить до '+MAX_SCHEME_IMAGES+' картинок к одной подсказке или ответу');
+    files.forEach(validateHintFile);
+    const schemeId=owner.id,questionId=question.id,revision=nextRevision,key=schemeId+'/'+questionId+(answer?'/'+optionId:''),replacementKey=key+'/'+replaceId,ticket=Symbol();
+    if(replaceId)uploads.set(replacementKey,ticket);
+    // Reading may finish out of order; commit additions in the order they were selected.
+    // Attach the error handler now, even while another operation owns the queue.
+    const reading=Promise.all(files.map(async file=>assertHintImage(await readImage(file)))).then(images=>({images}),error=>({error}));
+    const previous=imageQueues.get(key)||Promise.resolve();
+    const operation=previous.catch(()=>{}).then(async()=>{
+      if(replaceId&&uploads.get(replacementKey)!==ticket)return;
+      const loaded=await reading;
+      if(replaceId&&uploads.get(replacementKey)!==ticket)return;
+      if(loaded.error)throw loaded.error;
+      const scheme=getSchemes().find(s=>s.id===schemeId),liveQuestion=scheme?.nodes.find(n=>n.id===questionId);
+      if(!scheme||liveQuestion?.type!=='question')throw new Error('Вопрос уже удалён. Картинки не прикреплены.');
+      const liveTarget=answer?liveQuestion.options.find(o=>o.id===optionId):liveQuestion;
+      if(!liveTarget)throw new Error('Ответ уже удалён. Примеры не прикреплены.');
+      const gallery=imageGallery(liveTarget,plural,legacy);
+      if(replaceId&&!gallery.some(i=>i.id===replaceId))return;
+      if(!replaceId&&gallery.length+loaded.images.length>MAX_SCHEME_IMAGES)throw new Error('В галерее уже достигнут предел '+MAX_SCHEME_IMAGES+' картинок');
+      const additions=loaded.images.map(image=>({name:image.name,data:image.data,id:replaceId||crypto.randomUUID()}));
+      setImageGallery(liveTarget,plural,legacy,replaceId?gallery.map(image=>image.id===replaceId?additions[0]:image):[...gallery,...additions]);
+      scheme.status='draft';scheme.revision=Math.max(scheme.revision,revision);scheme.updatedAt=new Date().toISOString();
+      save(scheme);if(await persist()===false)throw new Error('Картинки пока не сохранены. Скачай резервную копию.');
+      if(editId===schemeId)render();notify(replaceId?'Картинка заменена':'Добавлено картинок: '+additions.length);
+    });
+    imageQueues.set(key,operation);
+    try{await operation;}finally{
+      if(imageQueues.get(key)===operation)imageQueues.delete(key);
+      if(replaceId&&uploads.get(replacementKey)===ticket)uploads.delete(replacementKey);
+    }
+  }
+  async function removeGalleryImage(answer,optionId,imageId){
+    const scheme=current(),question=node(),target=answer?question?.options?.find(o=>o.id===optionId):question;
+    if(!scheme||!target)return;
+    const [plural,legacy]=imageFields(answer),gallery=imageGallery(target,plural,legacy),id=imageId||gallery[0]?.id;
+    if(!gallery.some(image=>image.id===id))return;
+    uploads.delete(scheme.id+'/'+question.id+(answer?'/'+optionId:'')+'/'+id);
+    setImageGallery(target,plural,legacy,gallery.filter(image=>image.id!==id));
+    scheme.status='draft';scheme.revision=Math.max(scheme.revision,nextRevision);scheme.updatedAt=new Date().toISOString();
+    save(scheme);if(await persist()===false)throw new Error('Не удалось сохранить удаление картинки');
+    render();notify('Картинка удалена');
+  }
   function nodeEditor(s,n){
-    const targets=n.options?.map((o,i)=>'<div class="builder-option"><div class="builder-option-index">'+(i+1)+'</div><div class="builder-option-fields"><label class="field">Текст ответа<input data-option-field="label" data-option-id="'+o.id+'" maxlength="300" value="'+esc(o.label)+'"></label><label class="field">Дальше перейти к<select data-option-field="next" data-option-id="'+o.id+'"><option value="">Выбери блок…</option>'+s.nodes.filter(q=>q.id!==n.id).map((q,j)=>'<option value="'+q.id+'" '+(q.id===o.next?'selected':'')+'>'+esc(q.title||'Без названия')+' · '+(q.type==='result'?'итог':'вопрос')+'</option>').join('')+'</select></label></div><button class="text-button danger" data-builder-action="remove-option" data-id="'+o.id+'" aria-label="Удалить ответ '+(i+1)+'" '+(n.options.length<=2?'disabled':'')+'>×</button></div>').join('');
+    const targets=n.options?.map((o,i)=>'<div class="builder-option"><div class="builder-option-index">'+(i+1)+'</div><div class="builder-option-content"><div class="builder-option-fields"><label class="field">Текст ответа<input data-option-field="label" data-option-id="'+o.id+'" maxlength="300" value="'+esc(o.label)+'"></label><label class="field">Дальше перейти к<select data-option-field="next" data-option-id="'+o.id+'"><option value="">Выбери блок…</option>'+s.nodes.filter(q=>q.id!==n.id).map((q,j)=>'<option value="'+q.id+'" '+(q.id===o.next?'selected':'')+'>'+esc(q.title||'Без названия')+' · '+(q.type==='result'?'итог':'вопрос')+'</option>').join('')+'</select></label></div>'+answerMedia(o,i)+'</div><button class="text-button danger" data-builder-action="remove-option" data-id="'+o.id+'" aria-label="Удалить ответ '+(i+1)+'" '+(n.options.length<=2?'disabled':'')+'>×</button></div>').join('');
     return '<div class="builder-editor-head"><span class="eyebrow">'+(n.type==='question'?'Вопрос':'Итоговый блок')+'</span>'+button('delete-node','Удалить блок','text-button danger')+'</div><label class="field">'+(n.type==='question'?'Вопрос для разбора':'Название итога')+'<input data-node-field="title" maxlength="500" value="'+esc(n.title)+'"></label>'+
-    (n.type==='question'?'<label class="field builder-hint">Подсказка <textarea data-node-field="hint" maxlength="5000" placeholder="Что именно смотреть на графике">'+esc(n.hint)+'</textarea></label><div class="builder-options-head"><h3>Ответы и переходы</h3>'+button('add-option','＋ Ответ','text-button')+'</div><div class="builder-options">'+targets+'</div>':'<label class="field builder-hint">Категория результата<select data-node-field="kind">'+Object.entries(RESULT_KINDS).map(([k,label])=>'<option value="'+k+'" '+(n.kind===k?'selected':'')+'>'+label+'</option>').join('')+'</select></label><label class="field builder-hint">Пояснение<textarea data-node-field="description" maxlength="5000" placeholder="Что означает этот итог и что зафиксировать">'+esc(n.description)+'</textarea></label><div class="builder-result-tip">В конце маршрута можно записать сделку или наблюдение без входа. Категория итога сохраняется для статистики.</div>');
+    (n.type==='question'?'<label class="field builder-hint">Подсказка <textarea data-node-field="hint" maxlength="5000" placeholder="Что именно смотреть на графике">'+esc(n.hint)+'</textarea></label>'+hintMedia(n)+'<div class="builder-options-head"><h3>Ответы и переходы</h3>'+button('add-option','＋ Ответ','text-button')+'</div><div class="builder-options">'+targets+'</div>':'<label class="field builder-hint">Категория результата<select data-node-field="kind">'+Object.entries(RESULT_KINDS).map(([k,label])=>'<option value="'+k+'" '+(n.kind===k?'selected':'')+'>'+label+'</option>').join('')+'</select></label><label class="field builder-hint">Пояснение<textarea data-node-field="description" maxlength="5000" placeholder="Что означает этот итог и что зафиксировать">'+esc(n.description)+'</textarea></label><div class="builder-result-tip">В конце маршрута можно записать сделку или наблюдение без входа. Категория итога сохраняется для статистики.</div>');
   }
-  function graph(s){
-    if(!s.nodes.length)return '<p class="footnote">Здесь появится схема.</p>';
-    const byId=new Map(s.nodes.map(n=>[n.id,n])),depth=new Map(),queue=[s.startId];depth.set(s.startId,0);
-    for(let i=0;i<queue.length;i++){const n=byId.get(queue[i]);if(n?.type==='question')for(const o of n.options)if(byId.has(o.next)&&!depth.has(o.next)){depth.set(o.next,depth.get(n.id)+1);queue.push(o.next);}}
-    // Put shared outcomes below all their incoming paths when the graph is acyclic.
-    const degree=new Map([...depth.keys()].map(id=>[id,0]));
-    for(const id of degree.keys()){const n=byId.get(id);if(n?.type==='question')for(const o of n.options)if(degree.has(o.next))degree.set(o.next,degree.get(o.next)+1);}
-    const ordered=[...degree].filter(([,n])=>n===0).map(([id])=>id),ranks=new Map([[s.startId,0]]);
-    for(let i=0;i<ordered.length;i++){const id=ordered[i],n=byId.get(id);if(n?.type==='question')for(const o of n.options)if(degree.has(o.next)){ranks.set(o.next,Math.max(ranks.get(o.next)||0,(ranks.get(id)||0)+1));degree.set(o.next,degree.get(o.next)-1);if(degree.get(o.next)===0)ordered.push(o.next);}}
-    if(ordered.length===degree.size)for(const [id,d] of ranks)depth.set(id,d);
-    let last=Math.max(0,...depth.values());for(const n of s.nodes)if(!depth.has(n.id))depth.set(n.id,++last);
-    const rows=new Map();for(const n of s.nodes){const d=depth.get(n.id);if(!rows.has(d))rows.set(d,[]);rows.get(d).push(n);}
-    const columns=Math.max(...[...rows.values()].map(a=>a.length)),width=Math.max(720,columns*285+60),height=(Math.max(...depth.values())+1)*170+30,positions=new Map();
-    for(const [d,nodes] of rows)nodes.forEach((n,i)=>positions.set(n.id,{x:(width-nodes.length*285)/2+i*285+15,y:25+d*170}));
-    let edges='';for(const n of s.nodes)if(n.type==='question')n.options.forEach((o,i)=>{const from=positions.get(n.id),to=positions.get(o.next);if(!to)return;const x=from.x+125+(i-(n.options.length-1)/2)*38,y=from.y+70,tx=to.x+125,ty=to.y;edges+='<g><title>'+esc(o.label)+'</title><path d="M'+x+' '+y+' C'+x+' '+(y+45)+','+tx+' '+(ty-45)+','+tx+' '+ty+'" fill="none" stroke="#bcb0d6" stroke-width="1.6" marker-end="url(#custom-arrow)"/><text x="'+(x+5)+'" y="'+(y+22+i%2*13)+'" fill="#8c7b9f" font-size="10">'+esc(o.label.length>22?o.label.slice(0,21)+'…':o.label)+'</text></g>';});
-    const blocks=s.nodes.map(n=>{const {x,y}=positions.get(n.id);return '<g data-builder-action="select-node" data-id="'+n.id+'" role="button" tabindex="0" aria-label="Изменить: '+esc(n.title)+'" class="builder-map-node"><title>'+esc(n.title)+'</title><rect x="'+x+'" y="'+y+'" width="250" height="70" rx="12" fill="'+(n.type==='result'?(n.kind==='matched'?'#e8f4ee':'#fff4df'):'#fff')+'" stroke="'+(n.id===nodeId?'#8069cd':'#dcd3e8')+'" stroke-width="'+(n.id===nodeId?2:1.4)+'"/><text x="'+(x+15)+'" y="'+(y+24)+'" font-size="9" fill="#9b8aaf">'+(n.id===s.startId?'СТАРТ · ':'')+(n.type==='result'?'ИТОГ':'ВОПРОС')+'</text><text x="'+(x+15)+'" y="'+(y+46)+'" font-size="12" fill="#655472">'+esc(n.title.length>32?n.title.slice(0,31)+'…':n.title||'Без названия')+'</text></g>';}).join('');
-    return '<svg width="'+width+'" height="'+height+'" viewBox="0 0 '+width+' '+height+'" role="img" aria-label="Карта переходов схемы '+esc(s.name)+'"><defs><marker id="custom-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0L6 3L0 6" fill="none" stroke="#bcb0d6" stroke-width="1.4"/></marker></defs>'+edges+blocks+'</svg>';
-  }
+  const graph=s=>renderSchemeMap(s,{selectedId:nodeId,esc});
   async function handleClick(b){
     const action=b.dataset.builderAction;let s=current();
     if(action==='create'||action==='template'){s=action==='template'?templateScheme():newScheme();save(s);open(s);nextRevision=s.revision;render();}
@@ -65,6 +120,18 @@ export function createBuilder({getSchemes,save,persist=async()=>true,remove,run,
     else if(action==='list'){if(await persist()===false)throw new Error('Не удалось сохранить схему');editId=null;render();}
     else if(action==='filter'){libraryFilter=b.dataset.filter;render();}
     else if(action==='select-node'){nodeId=b.dataset.id;s.editorNodeId=nodeId;save(s);render();document.querySelector('.builder-node-editor')?.scrollIntoView({block:'nearest',behavior:'smooth'});}
+    else if(action==='choose-answer-image'||action==='choose-hint-image'){
+      const input=b.closest('.hint-media-editor').querySelector('input[type="file"]');
+      if(b.dataset.imageId){input.dataset.replaceId=b.dataset.imageId;input.multiple=false;}else{delete input.dataset.replaceId;input.multiple=true;}
+      input.click();
+    }
+    else if(action==='open-answer-image'||action==='open-hint-image'){
+      const answer=action==='open-answer-image',target=answer?node()?.options?.find(o=>o.id===b.dataset.id):node();
+      const image=imageGallery(target,...imageFields(answer)).find(image=>image.id===b.dataset.imageId);
+      if(image)showImage(image.data,image.name);
+    }
+    else if(action==='remove-answer-image')await removeGalleryImage(true,b.dataset.id,b.dataset.imageId);
+    else if(action==='remove-hint-image')await removeGalleryImage(false,undefined,b.dataset.imageId);
     else if(action==='duplicate'){s=duplicateScheme(s);save(s);open(s);nextRevision=s.revision;render();notify('Создана независимая копия');}
     else if(action==='add-question'||action==='add-result'){const n=action==='add-question'?newQuestion():newResult();s.nodes.push(n);nodeId=n.id;if(!s.startId&&n.type==='question')s.startId=n.id;touch();render();}
     else if(action==='add-option'){node().options.push(newOption());touch();render();}
@@ -98,5 +165,5 @@ export function createBuilder({getSchemes,save,persist=async()=>true,remove,run,
     else return;touch();
     if(el.tagName==='SELECT')render();
   }
-  return {render:()=>editId?editor():listing(),handleClick,handleInput};
+  return {render:()=>editId?editor():listing(),handleClick,handleInput,attachHintImage,attachAnswerImage,attachHintImages,attachAnswerImages};
 }
