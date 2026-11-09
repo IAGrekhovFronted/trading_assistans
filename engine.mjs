@@ -1,4 +1,6 @@
+import {discardFutureSchemes,assertSchemeTrail,schemeDecisionPath,previousSchemeStages} from './scheme-flow.mjs';
 import {customRoute,customAnswer,customEvaluation,inspectScheme} from './schemes.mjs';
+import {assertTradeMetadata} from './trade-data.mjs';
 export const ALGORITHM_VERSION = '0.1';
 export const FORMAT = 'entry-navigator/v1';
 const directions = [{value:'down',label:'Вниз',detail:'Понижаются вершины и минимумы',icon:'↘'},{value:'up',label:'Вверх',detail:'Повышаются вершины и минимумы',icon:'↗'},{value:'unclear',label:'Не могу определить',detail:'Смешанная структура или диапазон',icon:'≈'}];
@@ -82,11 +84,11 @@ export function evaluation(answers={}) {
 }
 export function freshSession() {
   const now=new Date().toISOString();
-  return {id:crypto.randomUUID(),createdAt:now,updatedAt:now,algorithmVersion:ALGORITHM_VERSION,symbol:'BTC/USDT',expiryMinutes:5,answers:{},zone:'',zoneStrength:'unknown',notes:'',screenshots:[],disposition:'draft',trade:{executed:false,outcome:'pending',entryTime:'',entryPrice:'',exitPrice:'',stake:'',payout:''}};
+  return {id:crypto.randomUUID(),createdAt:now,updatedAt:now,algorithmVersion:ALGORITHM_VERSION,symbol:'BTC/USDT',expiryMinutes:5,answers:{},zone:'',zoneStrength:'unknown',notes:'',screenshots:[],disposition:'draft',trade:{executed:false,outcome:'pending',entryTime:'',exitTime:'',mode:'',externalId:'',sourceParser:'',entryPrice:'',exitPrice:'',stake:'',payout:''}};
 }
 export const routeFor=s=>s.schemeSnapshot?customRoute(s):route(s.answers);
 export const evaluationFor=s=>s.schemeSnapshot?customEvaluation(s):evaluation(s.answers);
-export const answerFor=(s,key,value)=>s.schemeSnapshot?customAnswer(s,key,value):answer(s,key,value);
+export const answerFor=(s,key,value)=>discardFutureSchemes(s.schemeSnapshot?customAnswer(s,key,value):answer(s,key,value));
 export function answerAndAdvance(session,key,value){
   if(session.decisionSnapshot)throw new Error('Путь уже зафиксирован');
   const r=routeFor(session),index=r.steps.findIndex(q=>q.key===key);
@@ -103,7 +105,8 @@ export function freshSchemeSession(scheme){
 export function lockDecision(s,type) {
   const result=evaluationFor(s);
   if(result.kind==='draft')throw new Error('Сначала заверши путь вопросов');
-  return {...s,disposition:type,updatedAt:new Date().toISOString(),decisionSnapshot:{answers:structuredClone(s.answers),algorithmVersion:s.algorithmVersion,conclusion:result,at:new Date().toISOString()},trade:{...s.trade,executed:type==='trade'}};
+  const clean=discardFutureSchemes(s),path=schemeDecisionPath(clean);
+  return {...clean,disposition:type,updatedAt:new Date().toISOString(),decisionSnapshot:{answers:structuredClone(s.answers),algorithmVersion:s.algorithmVersion,conclusion:result,at:new Date().toISOString(),...(path.length?{schemePath:path}:{})},trade:{...s.trade,executed:type==='trade'}};
 }
 export function decimal(v) {
   if(v===''||v===null||v===undefined)return null;
@@ -132,6 +135,8 @@ export function validateImport(value) {
     if(typeof s.createdAt!=='string'||!Number.isFinite(Date.parse(s.createdAt))||!s.answers||typeof s.answers!=='object'||Array.isArray(s.answers)||!s.trade||!['pending','win','loss','draw'].includes(s.trade.outcome)||typeof s.trade.executed!=='boolean')throw new Error('Повреждённая запись');
     if(s.schemeSnapshot){const v=inspectScheme(s.schemeSnapshot);if(!v.valid||s.schemeId!==s.schemeSnapshot.id||s.algorithmVersion!=='custom.'+s.schemeSnapshot.revision)throw new Error('Некорректная версия схемы в разборе');}
     else if(s.schemeId)throw new Error('В разборе отсутствует версия схемы');
+    assertTradeMetadata(s.trade);
+    assertSchemeTrail(s);
     const r=routeFor(s);
     const reachable=new Set(r.steps.map(q=>q.key));
     for(const [key,val] of Object.entries(s.answers))if(!reachable.has(key)||!r.steps.find(q=>q.key===key)?.options.some(o=>o.value===val))throw new Error('Недопустимый путь ответов');
@@ -148,13 +153,15 @@ export function validateImport(value) {
       const snap=s.decisionSnapshot;
       if(!snap||!r.complete||typeof snap.at!=='string'||!Number.isFinite(Date.parse(snap.at))||!snap.conclusion||!['matched','waiting','unclear'].includes(snap.conclusion.kind)||!snap.answers||JSON.stringify(snap.answers)!==JSON.stringify(s.answers)||snap.algorithmVersion!==s.algorithmVersion)throw new Error('Нет корректного зафиксированного пути');
       if(s.schemeSnapshot&&JSON.stringify(snap.conclusion)!==JSON.stringify(evaluationFor(s)))throw new Error('Итог не совпадает с сохранённой схемой');
+      const path=schemeDecisionPath(s);if((path.length||snap.schemePath!==undefined)&&JSON.stringify(path)!==JSON.stringify(snap.schemePath))throw new Error('Маршрут не совпадает с зафиксированным решением');
+      if(s.schemeTrail?.next.length)throw new Error('В зафиксированном разборе осталось незавершённое продолжение');
     }
     return {...s,screenshots};
   });
 }
 export function csv(sessions) {
   const cell=v=>{const raw=String(v??'');const safe=typeof v==='string'&&/^[=+@\-\t\r]/.test(v)?"'"+raw:raw;return '"'+safe.replaceAll('"','""')+'"';};
-  const rows=[['ID','Создано','Версия алгоритма','Ветка','Направление','Подготовка','Условия','Сделка','Исход','Вход','Закрытие','Ставка','Выплата','Прибыль','Зона','Комментарий','ID схемы','Версия схемы']];
-  for(const s of sessions){const a=s.decisionSnapshot?.answers||s.answers;rows.push([s.id,s.createdAt,s.algorithmVersion,scenarioFor(s),a.local||'',a.pullback||'',s.decisionSnapshot?.conclusion?.kind||evaluationFor(s).kind,s.trade.executed?'да':'нет',s.trade.outcome,s.trade.entryPrice,s.trade.exitPrice,s.trade.stake,s.trade.payout,profit(s),s.zone,s.notes,s.schemeId||'',s.schemeSnapshot?.revision||'']);}
+  const rows=[['ID','Создано','Версия алгоритма','Ветка','Направление','Подготовка','Условия','Сделка','Исход','Вход','Закрытие','Ставка','Выплата','Прибыль','Зона','Комментарий','ID схемы','Версия схемы','Путь по схемам','Время открытия','Время закрытия','Режим','Номер сделки','Формат источника']];
+  for(const s of sessions){const a=s.decisionSnapshot?.answers||s.answers;rows.push([s.id,s.createdAt,s.algorithmVersion,scenarioFor(s),a.local||'',a.pullback||'',s.decisionSnapshot?.conclusion?.kind||evaluationFor(s).kind,s.trade.executed?'да':'нет',s.trade.outcome,s.trade.entryPrice,s.trade.exitPrice,s.trade.stake,s.trade.payout,profit(s),s.zone,s.notes,s.schemeId||'',s.schemeSnapshot?.revision||'',s.schemeSnapshot?[...previousSchemeStages(s),s].map(stage=>stage.schemeSnapshot.name+' · v'+stage.schemeSnapshot.revision).join(' → '):'',s.trade.entryTime||'',s.trade.exitTime||'',s.trade.mode||'',s.trade.externalId||'',s.trade.sourceParser||'']);}
   return '\uFEFF'+rows.map(row=>row.map(cell).join(';')).join('\r\n');
 }

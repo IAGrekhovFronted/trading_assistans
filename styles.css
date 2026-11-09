@@ -31,3 +31,65 @@
 
 .journal-row-actions{display:flex;align-items:center;justify-content:flex-end;gap:12px}.journal-row-actions button{font-size:11px;white-space:nowrap}.table-wrap .journal-actions{position:sticky;right:0;background:#fff;box-shadow:-8px 0 12px -12px #786990;z-index:1}tbody tr:hover .journal-actions{background:#fbfaff}.record-delete-summary{margin-top:16px;font-size:13px;font-weight:600;line-height:1.7;color:#665575;overflow-wrap:anywhere}.confirm-dialog .confirm-message{overflow-wrap:anywhere}
 @media(max-width:650px){.journal-row-actions{flex-direction:column;align-items:stretch;gap:0}.journal-row-actions button{min-height:34px;padding:6px 8px}.table-wrap .journal-actions{padding:8px;min-width:100px}}
+
+/* Linked schemes share one journal record. */
+.scheme-link-editor{margin-top:20px;padding-top:20px;border-top:1px solid var(--border,#e4dfef)}
+.scheme-handoff{display:flex;align-items:center;justify-content:space-between;gap:24px;margin:24px 0;padding:22px;border:1px solid #d9cdef;border-radius:14px;background:#f8f5fd}
+.scheme-handoff h3{margin:8px 0;overflow-wrap:anywhere}
+.scheme-handoff p{margin:0;color:#897c99;font-size:13px;line-height:1.6}
+.scheme-handoff button{flex-shrink:0}
+.scheme-history{padding:22px;margin-top:22px;overflow-wrap:anywhere}
+.scheme-history h3{font-size:14px;margin:0 0 16px}
+.scheme-history details+details{border-top:1px solid #e7e1f0;margin-top:14px;padding-top:14px}
+.scheme-history summary{cursor:pointer;font-size:13px;line-height:1.6}
+.scheme-history summary span{display:block;color:#9486a4;font-size:11px;margin-left:14px}
+.scheme-history dl{font-size:12px;line-height:1.6;margin:16px 0}
+.scheme-history dt{color:#92839e;margin-top:12px}
+.scheme-history dd{margin:2px 0 0;color:#53445f}
+.scheme-history-result{font-size:12px;color:#8064a0}
+@media(max-width:680px){.scheme-handoff{flex-direction:column;align-items:stretch;padding:18px}.scheme-handoff button{width:100%}.scheme-history{padding:18px}}
+
+@media(max-width:900px){.rail.has-scheme-history{display:block}.rail.has-scheme-history>.route-card,.rail.has-scheme-history>.branch-card{display:none}.rail.has-scheme-history>.scheme-history{margin-top:0}}
+
+/* Shared schemes are referenced by ID, without copying their questions. */
+.scheme-groups{margin-bottom:20px}
+.scheme-group-badge{font-size:9px;background:#f3effb;color:#806a9d}
+.scheme-card-meta>.inline-row{flex-wrap:wrap}
+.custom-scheme-card .scheme-usage-count{font-size:11px;color:#8b789d;margin-top:10px}
+.shared-intro .inline-row{margin-top:14px}
+.shared-intro .inline-row button{margin-left:0}
+.scheme-group-editor{display:grid;grid-template-columns:minmax(200px,340px) minmax(0,1fr);align-items:center;gap:18px;margin-top:18px}
+.scheme-group-editor p{font-size:11px;line-height:1.7;color:#93859f}
+.scheme-usage{margin-top:18px;padding:15px 17px;background:#faf8fd;border:1px solid #e9e1f2;border-radius:10px;font-size:12px}
+.scheme-usage summary,.inherited-context summary{cursor:pointer;line-height:1.6;color:#79618e}
+.scheme-usage ul{list-style:none;margin:10px 0 0;padding:0}
+.scheme-usage li{padding:5px 0}
+.scheme-usage small{display:block;color:#93859f;font-size:11px;padding-left:10px}
+.scheme-usage p{font-size:11px;color:#93859f;margin-top:10px;line-height:1.7}
+.inherited-context{margin:20px 0;padding:15px 17px;border:1px solid #e4daf0;border-radius:11px;background:#faf8fd;font-size:12px}
+.inherited-context h3{font-size:12px;margin:15px 0 8px;overflow-wrap:anywhere}
+.inherited-context dl{display:grid;grid-template-columns:minmax(0,1fr) minmax(60px,.6fr);gap:8px 16px;font-size:11px;line-height:1.7;overflow-wrap:anywhere}
+.inherited-context dt{color:#94859e}
+.inherited-context dd{margin:0;color:#5f4d70}
+@media(max-width:650px){.scheme-group-editor{grid-template-columns:1fr;gap:8px}.scheme-card-meta{align-items:flex-start;gap:10px}.inherited-context dl{grid-template-columns:1fr;gap:3px}.inherited-context dd{margin-bottom:8px}.shared-intro .inline-row{align-items:stretch;flex-direction:column}}
+
+/* Text-to-fields import is previewed before it changes a saved trade. */
+.trade-import{border:1px solid #dfd5ef;border-radius:12px;background:#faf8fd;margin:18px 0 24px;font-size:12px;overflow-wrap:anywhere}
+.trade-import>summary{cursor:pointer;padding:16px 18px;color:#75618f;font-weight:600}
+.trade-import>summary span{font-size:10px;color:#43846d;margin-left:12px}
+.trade-import-body{padding:0 18px 18px;display:grid;gap:14px}
+.trade-import-body>p{font-size:11px;color:#93869e}
+.trade-import-body textarea{min-height:170px;font-size:12px;line-height:1.6}
+.trade-import-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.trade-parse-error{padding:12px;border:1px solid #eac6ce;border-radius:9px;background:#fff3f5;color:#a64f61;line-height:1.7}
+.trade-parse-preview{padding:17px;background:white;border:1px solid #e5dfed;border-radius:10px}
+.trade-parse-preview h4{font-size:13px;margin:0 0 15px;color:#665177}
+.trade-parse-preview dl{margin:0;display:grid;gap:9px}
+.trade-parse-preview dl>div{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:15px;line-height:1.6}
+.trade-parse-preview dt{color:#97869f}
+.trade-parse-preview dd{margin:0;color:#584265;font-weight:550;overflow-wrap:anywhere}
+.trade-parse-net{border-top:1px solid #eae3f0;margin-top:15px;padding-top:14px;display:flex;justify-content:space-between;gap:15px;color:#83718f}
+.trade-parse-net strong{color:#5b4470}
+.trade-parse-replace{color:#a07c45;font-size:11px;line-height:1.7;margin-top:12px}
+.trade-parse-preview>.primary{margin-top:14px}
+@media(max-width:650px){.trade-import-body{padding:0 12px 14px}.trade-import>summary{padding:14px 12px}.trade-parse-preview{padding:12px}.trade-parse-preview dl>div{grid-template-columns:1fr;gap:2px}.trade-parse-preview dd{margin-bottom:6px}.trade-parse-net{flex-wrap:wrap}.trade-parse-preview>.primary{width:100%}}

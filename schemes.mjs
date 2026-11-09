@@ -1,5 +1,8 @@
 import {assertHintImage,assertImageGallery} from './hint-images.mjs';
 export const SCHEME_FORMAT='entry-navigator/schemes-v1';
+export const SCHEME_GROUPS={context:'Контекстная схема',shared:'Общая схема'};
+export const schemeGroup=s=>s.group??'context';
+export const schemesUsing=(schemes,targetId)=>schemes.filter(s=>s.id!==targetId&&s.nodes.some(n=>n.type==='result'&&n.nextSchemeId===targetId));
 export const RESULT_KINDS={matched:'Условия отмечены',waiting:'Ожидание',unclear:'Неясная ситуация'};
 const uid=()=>crypto.randomUUID();
 export const newOption=(label='Новый ответ',next='')=>({id:uid(),label,next});
@@ -9,7 +12,10 @@ export function newScheme(){
   const yes={...newResult(),title:'Условия отмечены',kind:'matched'},no=newResult(),q={...newQuestion(),title:'Что проверяем?'};
   q.options[0].next=yes.id;q.options[1].next=no.id;
   const now=new Date().toISOString();
-  return {id:uid(),name:'Новая схема',description:'',status:'draft',revision:1,createdAt:now,updatedAt:now,startId:q.id,nodes:[q,yes,no]};
+  return {id:uid(),name:'Новая схема',description:'',group:'context',status:'draft',revision:1,createdAt:now,updatedAt:now,startId:q.id,nodes:[q,yes,no]};
+}
+export function newSharedScheme(name='Новая общая схема'){
+  return {...newScheme(),name,group:'shared',nodes:[],startId:''};
 }
 export function templateScheme(){
   const s=newScheme();s.name='Вход по локальному тренду';s.description='Рабочая гипотеза группы 1. Можно изменить каждый шаг и переход.';
@@ -37,6 +43,7 @@ export function assertSchemeShape(s){
   const text=(v,max)=>typeof v==='string'&&v.length<=max;
   const id=v=>text(v,100)&&/^[A-Za-z0-9_-]+$/.test(v)&&!['__proto__','constructor','prototype'].includes(v);
   if(!s||!id(s.id)||!text(s.name,200)||!text(s.description,5000)||!Number.isInteger(s.revision)||s.revision<1||!(s.startId===''||id(s.startId))||!Array.isArray(s.nodes)||s.nodes.length>5000)throw new Error('Некорректный формат схемы');
+  if(s.group!==undefined&&!Object.hasOwn(SCHEME_GROUPS,s.group))throw new Error('Некорректная группа схемы');
   if(s.status!==undefined&&!['draft','ready'].includes(s.status))throw new Error('Некорректный статус схемы');
   if(s.editorNodeId!==undefined&&!id(s.editorNodeId))throw new Error('Некорректный сохранённый блок редактора');
   const ids=new Set();
@@ -45,6 +52,7 @@ export function assertSchemeShape(s){
     ids.add(n.id);
     if(n.hintImage!==undefined){if(n.type!=='question')throw new Error('Скриншот подсказки доступен только для вопроса');assertHintImage(n.hintImage);}
     if(n.hintImages!==undefined){if(n.type!=='question')throw new Error('Галерея подсказки доступна только для вопроса');assertImageGallery(n.hintImages);}
+    if(n.nextSchemeId!==undefined&&(n.type!=='result'||!(n.nextSchemeId===''||id(n.nextSchemeId))))throw new Error('Некорректная схема назначения');
     if(n.type==='result'){if(!Object.hasOwn(RESULT_KINDS,n.kind)||!text(n.description,5000))throw new Error('Некорректный итог схемы');}
     else{
       if(!text(n.hint,5000)||!Array.isArray(n.options)||n.options.length>100)throw new Error('Некорректные варианты ответа');
@@ -62,6 +70,7 @@ export function inspectScheme(s){
   for(const n of s.nodes){
     const name=n.title.trim()||'Без названия';
     if(!n.title.trim())errors.push('У блока нет названия.');
+    if(n.type==='result'&&n.nextSchemeId===s.id)errors.push('«'+name+'»: выбери другую схему для перехода.');
     if(n.type==='question'){
       if(n.options.length<2)errors.push('«'+name+'»: нужны хотя бы два ответа.');
       if(new Set(n.options.map(o=>o.label.trim())).size!==n.options.length)errors.push('«'+name+'»: названия ответов повторяются.');

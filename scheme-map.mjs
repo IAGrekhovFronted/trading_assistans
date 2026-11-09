@@ -34,7 +34,7 @@ function browserTextMeasure(){
     const width=context.measureText(text).width;cache.set(key,width);return width;
   };
 }
-export function layoutSchemeMap(scheme,{measureText=estimateWidth}={}){
+export function layoutSchemeMap(scheme,{measureText=estimateWidth,schemeNames=new Map()}={}){
   const nodes=scheme.nodes,byId=new Map(nodes.map(n=>[n.id,n])),edges=[],out=new Map(),incoming=new Map();
   for(const n of nodes){out.set(n.id,[]);incoming.set(n.id,[]);}
   for(const n of nodes)outgoing(n).forEach((o,index)=>{
@@ -63,7 +63,9 @@ export function layoutSchemeMap(scheme,{measureText=estimateWidth}={}){
   const widths=new Map(nodes.map(n=>[n.id,Math.max(260,outgoing(n).length*130)]));
   const textMetrics=new Map(nodes.map(n=>{
     const titleLines=wrapMapText(n.title||'Без названия',widths.get(n.id)-32,12,measureText);
-    return [n.id,{titleLines,height:Math.max(MIN_NODE_HEIGHT,48+(titleLines.length-1)*18+20)}];
+    const titleBottom=48+(titleLines.length-1)*18;
+    const linkLines=n.type==='result'&&n.nextSchemeId?wrapMapText('→ '+(schemeNames.get(n.nextSchemeId)||'Схема недоступна'),widths.get(n.id)-32,11,measureText):[];
+    return [n.id,{titleLines,linkLines,linkY:titleBottom+24,height:Math.max(MIN_NODE_HEIGHT,titleBottom+20+(linkLines.length?24+(linkLines.length-1)*16:0))}];
   }));
   const labelMetrics=new Map(edges.map(e=>{
     const lines=wrapMapText(e.label||'Ответ',LABEL_WIDTH-16,10,measureText);
@@ -84,7 +86,7 @@ export function layoutSchemeMap(scheme,{measureText=estimateWidth}={}){
     let labelHeight=0;for(const id of row)for(const e of out.get(id))labelHeight=Math.max(labelHeight,labelMetrics.get(e).height);
     const gap=Math.max(GAP,labelHeight+48);
     rowMetrics.set(d,{y:rowY,height,gap});
-    for(const id of row){const metrics=textMetrics.get(id);positions.set(id,{x,y:rowY,width:widths.get(id),height:metrics.height,titleLines:metrics.titleLines,rank:d});x+=widths.get(id)+COLUMN_GAP;}
+    for(const id of row){const metrics=textMetrics.get(id);positions.set(id,{x,y:rowY,width:widths.get(id),height:metrics.height,titleLines:metrics.titleLines,linkLines:metrics.linkLines,linkY:metrics.linkY,rank:d});x+=widths.get(id)+COLUMN_GAP;}
     rowY+=height+gap;
   }
   const center=id=>{const p=positions.get(id);return p.x+p.width/2;};
@@ -118,16 +120,16 @@ export function layoutSchemeMap(scheme,{measureText=estimateWidth}={}){
   for(const e of routed){for(const [,y]of e.points)height=Math.max(height,y+PADDING);height=Math.max(height,e.labelY+e.labelHeight/2+PADDING);}
   return {positions,edges:routed,width:contentWidth+PADDING*2+leftMargin+rightMargin,height};
 }
-export function renderSchemeMap(scheme,{selectedId,esc}){
+export function renderSchemeMap(scheme,{selectedId,esc,schemeNames=new Map()}){
   if(!scheme.nodes.length)return '<p class="footnote">Здесь появится схема.</p>';
-  const map=layoutSchemeMap(scheme,{measureText:browserTextMeasure()});
+  const map=layoutSchemeMap(scheme,{measureText:browserTextMeasure(),schemeNames});
   const edges=map.edges.map(e=>{
     const lines=e.labelLines,height=e.labelHeight,active=e.source===selectedId||e.target===selectedId;
     return '<g class="scheme-map-edge'+(active?' connected':'')+'"><title>'+esc(e.label)+'</title><path d="'+e.points.map(([x,y],i)=>(i?'L':'M')+x+' '+y).join(' ')+'" fill="none" stroke="'+(active?'#9679c8':'#bcb0d6')+'" stroke-width="1.7" stroke-linejoin="round" marker-end="url(#custom-arrow)"/><rect x="'+(e.labelX-e.labelWidth/2)+'" y="'+(e.labelY-height/2)+'" width="'+e.labelWidth+'" height="'+height+'" rx="6" fill="#faf8fd"/><text class="scheme-map-label" text-anchor="middle" fill="#857096" font-size="10">'+lines.map((line,i)=>'<tspan x="'+e.labelX+'" y="'+(e.labelY+(i-(lines.length-1)/2)*14+3)+'">'+esc(line)+'</tspan>').join('')+'</text></g>';
   }).join('');
   const blocks=scheme.nodes.map(n=>{
     const p=map.positions.get(n.id);
-    return '<g data-builder-action="select-node" data-id="'+esc(n.id)+'" role="button" tabindex="0" aria-label="Изменить: '+esc(n.title)+'" class="builder-map-node"><title>'+esc(n.title)+'</title><rect x="'+p.x+'" y="'+p.y+'" width="'+p.width+'" height="'+p.height+'" rx="12" fill="'+(n.type==='result'?(n.kind==='matched'?'#e8f4ee':'#fff4df'):'#fff')+'" stroke="'+(n.id===selectedId?'#8069cd':'#dcd3e8')+'" stroke-width="'+(n.id===selectedId?2:1.4)+'"/><text x="'+(p.x+15)+'" y="'+(p.y+24)+'" font-size="9" fill="#9b8aaf">'+(n.id===scheme.startId?'СТАРТ · ':'')+(n.type==='result'?'ИТОГ':'ВОПРОС')+'</text><text class="scheme-map-title" font-size="12" fill="#655472">'+p.titleLines.map((line,i)=>'<tspan x="'+(p.x+15)+'" y="'+(p.y+48+i*18)+'">'+esc(line)+'</tspan>').join('')+'</text></g>';
+    return '<g data-builder-action="select-node" data-id="'+esc(n.id)+'" role="button" tabindex="0" aria-label="Изменить: '+esc(n.title)+'" class="builder-map-node"><title>'+esc(n.title)+'</title><rect x="'+p.x+'" y="'+p.y+'" width="'+p.width+'" height="'+p.height+'" rx="12" fill="'+(n.type==='result'?(n.kind==='matched'?'#e8f4ee':'#fff4df'):'#fff')+'" stroke="'+(n.id===selectedId?'#8069cd':'#dcd3e8')+'" stroke-width="'+(n.id===selectedId?2:1.4)+'"/><text x="'+(p.x+15)+'" y="'+(p.y+24)+'" font-size="9" fill="#9b8aaf">'+(n.id===scheme.startId?'СТАРТ · ':'')+(n.type==='result'?'ИТОГ'+(n.nextSchemeId?' · ПЕРЕХОД':''):'ВОПРОС')+'</text><text class="scheme-map-title" font-size="12" fill="#655472">'+p.titleLines.map((line,i)=>'<tspan x="'+(p.x+15)+'" y="'+(p.y+48+i*18)+'">'+esc(line)+'</tspan>').join('')+'</text>'+(p.linkLines.length?'<text class="scheme-map-link" font-size="11" fill="#8069b1">'+p.linkLines.map((line,i)=>'<tspan x="'+(p.x+15)+'" y="'+(p.y+p.linkY+i*16)+'">'+esc(line)+'</tspan>').join('')+'</text>':'')+'</g>';
   }).join('');
   return '<svg width="'+map.width+'" height="'+map.height+'" viewBox="0 0 '+map.width+' '+map.height+'" role="img" aria-label="Карта переходов схемы '+esc(scheme.name)+'"><defs><marker id="custom-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0L6 3L0 6" fill="none" stroke="#a68fbe" stroke-width="1.4"/></marker></defs>'+edges+blocks+'</svg>';
 }

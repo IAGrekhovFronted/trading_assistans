@@ -1,7 +1,10 @@
 import {createJournalDeletion,selectCurrentRecordId} from './journal.mjs';
 import {ALGORITHM_VERSION,FORMAT,route,routeFor,answerAndAdvance,evaluationFor,scenarioFor,freshSession,freshSchemeSession,lockDecision,decimal,profit,statistics,validateImport,csv} from './engine.mjs';
 import {repository} from './storage.mjs';
-import {validateSchemes} from './schemes.mjs';
+import {createTradeImport} from './trade-import.mjs';
+import {assertTradeMetadata} from './trade-data.mjs';
+import {schemeTransitionInfo,transitionToScheme,returnToScheme,previousSchemeStages} from './scheme-flow.mjs';
+import {validateSchemes,schemeGroup} from './schemes.mjs';
 import {createBuilder} from './builder.mjs';
 import {bindImageDrop} from './image-drop.mjs';
 import {validateHintFile,readHintImageFile,imageGallery} from './hint-images.mjs';
@@ -25,11 +28,12 @@ let search='',filter='all';
 const current=()=>sessions.find(s=>s.id===currentId);
 const examples=createExampleVisibility({load:()=>repository.meta('hiddenBuiltinExamples'),save:value=>repository.setMeta('hiddenBuiltinExamples',value)});
 const builder=createBuilder({getSchemes:()=>customSchemes,save:putScheme,persist:flush,remove:async id=>{customSchemes=customSchemes.filter(s=>s.id!==id);schemesDirty=true;if(!await flush())throw new Error('Не удалось сохранить удаление');},run:runScheme,render,notify,esc,showImage});
+const tradeImport=createTradeImport({getCurrent:current,save:put,persist:flush,render,notify,esc});
 const journalDeletion=createJournalDeletion({
   getSessions:()=>sessions,getCurrentId:()=>currentId,confirm:confirmRecordRemoval,flush,
   remove:(id,nextId)=>repository.removeRecord(id,nextId),
   commit:(id,nextId)=>{
-    pending.delete(id);sessions=sessions.filter(s=>s.id!==id);
+    pending.delete(id);tradeImport.forget(id);sessions=sessions.filter(s=>s.id!==id);
     if(currentId!==nextId){currentId=nextId;cursor=cursorForRecord(current());}
     view='journal';location.hash='journal';render();
   }
@@ -66,16 +70,53 @@ function render(){
   app.innerHTML=shell(view==='new'?wizard():view==='journal'?journal():view==='stats'?statsPage():view==='builder'?builder.render():schemes());
 }
 function optionLabel(q,value){return q.options.find(o=>o.value===value)?.label||'Ещё не выбран';}
+function schemeHistory(s){
+  const stages=previousSchemeStages(s);if(!stages.length)return '';
+  return '<div class="card scheme-history"><h3>Пройденные схемы · '+stages.length+'</h3>'+stages.map((stage,index)=>{
+    const r=routeFor(stage);
+    return '<details><summary>'+esc(stage.schemeSnapshot.name)+'<span>Версия '+stage.schemeSnapshot.revision+'</span></summary><dl>'+r.steps.map(q=>'<dt>'+esc(q.title)+'</dt><dd>'+esc(optionLabel(q,stage.answers[q.key]))+'</dd>').join('')+'</dl><p class="scheme-history-result">'+esc(r.result.title)+'</p>'+(!s.decisionSnapshot?'<button class="text-button" data-action="return-scheme" data-session-id="'+esc(s.id)+'" data-index="'+index+'">Вернуться к схеме</button>':'')+'</details>';
+  }).join('')+'</div>';
+}
+function inheritedContext(s){
+  const stages=previousSchemeStages(s);
+  if(!s.schemeSnapshot||schemeGroup(s.schemeSnapshot)!=='shared'||!stages.length)return '';
+  return '<details class="inherited-context"><summary>Контекст из предыдущих схем · '+stages.length+'</summary>'+stages.map(stage=>'<section><h3>'+esc(stage.schemeSnapshot.name)+'</h3><dl>'+routeFor(stage).steps.map(q=>'<dt>'+esc(q.title)+'</dt><dd>'+esc(optionLabel(q,stage.answers[q.key]))+'</dd>').join('')+'</dl></section>').join('')+'</details>';
+}
+
+function schemeHandoff(s){
+  const link=schemeTransitionInfo(s,customSchemes);if(!link||s.decisionSnapshot)return '';
+  return '<div class="scheme-handoff"><div><span class="eyebrow">'+(link.scheme&&schemeGroup(link.scheme)==='shared'?'Общая схема':'Другая ситуация')+'</span><h3>'+esc(link.scheme?.name||'Схема недоступна')+'</h3><p>'+(link.available?(link.cached?'Продолжи с сохранённого места.':'Следующая схема начнётся с первого вопроса.')+' Пройденный путь останется в этой записи.':esc(link.reason))+'</p></div><button class="primary" data-action="next-scheme" data-session-id="'+esc(s.id)+'" data-result-id="'+esc(link.resultId)+'" '+(!link.available?'disabled':'')+'>'+(link.cached?'Продолжить схему →':'Перейти к схеме →')+'</button></div>';
+}
+let schemeNavigationPending=false;
+async function navigateScheme(button,index){
+  if(schemeNavigationPending)return;
+  const before=current();if(!before||before.decisionSnapshot||before.id!==button.dataset.sessionId)return;
+  if(index===undefined&&(cursor<routeFor(before).steps.length||routeFor(before).end!==button.dataset.resultId))return;
+  schemeNavigationPending=true;button.disabled=true;
+  try{
+    if(!await flush())throw new Error('Сначала сохрани текущий разбор');
+    if(current()!==before||view!=='new')return;
+    if(index===undefined&&(cursor<routeFor(before).steps.length||routeFor(before).end!==button.dataset.resultId))return;
+    const updated=index===undefined?transitionToScheme(before,customSchemes):returnToScheme(before,index);
+    cursor=updated.cursor;put(updated);render();focusQuestion();
+    if(!await flush())throw new Error('Переход пока только в памяти. Скачай резервную копию.');
+  }finally{schemeNavigationPending=false;if(button.isConnected)button.disabled=false;}
+}
+function focusQuestion(){
+  document.querySelector('#question-title,#result-title')?.focus({preventScroll:true});
+  document.querySelector('.question-card')?.scrollIntoView({block:'start'});
+}
+
 function rail(s){
   const r=routeFor(s);
-  return '<aside class="rail"><div class="card route-card"><div class="route-top"><h3>Твой путь</h3><span class="route-count">'+r.steps.filter(q=>s.answers[q.key]).length+' ответов</span></div><div class="route-list">'+r.steps.map((q,i)=>'<button class="route-item '+(s.answers[q.key]?'done ':'')+(i===cursor?'current':'')+'" data-action="goto" data-index="'+i+'" '+(s.decisionSnapshot?'disabled':'')+'><span class="route-number">'+(s.answers[q.key]?'✓':i+1)+'</span><span><span class="route-title">'+esc(stepLabel(q))+'</span><span class="route-answer">'+esc(optionLabel(q,s.answers[q.key]))+'</span></span></button>').join('')+'</div><div class="route-bottom">'+(s.decisionSnapshot?'Путь зафиксирован. Исход добавляется отдельно.':'Ответы сохраняются автоматически. К любому пройденному шагу можно вернуться.')+'</div></div><div class="branch-card"><small>Текущий сценарий</small><p>'+esc(scenarioFor(s))+'</p></div></aside>';
+  return '<aside class="rail '+(previousSchemeStages(s).length?'has-scheme-history':'')+'"><div class="card route-card"><div class="route-top"><h3>Твой путь</h3><span class="route-count">'+r.steps.filter(q=>s.answers[q.key]).length+' ответов</span></div><div class="route-list">'+r.steps.map((q,i)=>'<button class="route-item '+(s.answers[q.key]?'done ':'')+(i===cursor?'current':'')+'" data-action="goto" data-index="'+i+'" '+(s.decisionSnapshot?'disabled':'')+'><span class="route-number">'+(s.answers[q.key]?'✓':i+1)+'</span><span><span class="route-title">'+esc(stepLabel(q))+'</span><span class="route-answer">'+esc(optionLabel(q,s.answers[q.key]))+'</span></span></button>').join('')+'</div><div class="route-bottom">'+(s.decisionSnapshot?'Путь зафиксирован. Исход добавляется отдельно.':'Ответы сохраняются автоматически. К любому пройденному шагу можно вернуться.')+'</div></div><div class="branch-card"><small>Текущий сценарий</small><p>'+esc(scenarioFor(s))+'</p></div>'+schemeHistory(s)+'</aside>';
 }
 function wizard(){
   const s=current();if(!s)return heading('Разбор ситуации','Начни новый разбор или выбери свою схему.')+'<section class="card empty"><div class="empty-icon">＋</div><h3>Пока нет разборов</h3><p>Новая запись появится после начала разбора.</p><div class="result-buttons"><button class="primary" data-action="new">Начать разбор</button><button class="secondary" data-action="nav" data-view="builder">Выбрать схему</button></div></section>';
   const r=routeFor(s);if(s.decisionSnapshot)cursor=r.steps.length;
   const end=r.complete&&cursor>=r.steps.length;
   cursor=Math.min(cursor,r.steps.length);
-  return heading('Разбор ситуации',s.schemeSnapshot?s.schemeSnapshot.name+' · версия '+s.schemeSnapshot.revision:'Один вопрос за раз. Сначала контекст, затем условия и реакция цены.','<button class="secondary" data-action="nav" data-view="builder">Выбрать схему →</button>')+
+  return heading('Разбор ситуации',s.schemeSnapshot?s.schemeSnapshot.name+' · версия '+s.schemeSnapshot.revision+(schemeGroup(s.schemeSnapshot)==='shared'?' · общая схема':'')+(previousSchemeStages(s).length?' · этап '+(previousSchemeStages(s).length+1):''):'Один вопрос за раз. Сначала контекст, затем условия и реакция цены.','<button class="secondary" data-action="nav" data-view="builder">Выбрать схему →</button>')+
   '<div class="workspace"><div>'+(!end?questionCard(s,r):resultCard(s))+(end?detailCard(s):'')+'</div>'+rail(s)+'</div>';
 }
 function referenceGallery(images,{kind,key,optionId,label}){
@@ -97,24 +138,24 @@ function selectAnswer(key,value){
   const session=current();if(!session||session.decisionSnapshot)return;
   if(routeFor(session).steps[cursor]?.key!==key)return;
   const updated=answerAndAdvance(session,key,value);cursor=updated.cursor;put(updated);render();
-  document.querySelector('#question-title,#result-title')?.focus({preventScroll:true});
-  document.querySelector('.question-card')?.scrollIntoView({block:'start'});
+  focusQuestion();
 }
 function questionCard(s,r){
   const q=r.steps[Math.min(cursor,r.steps.length-1)];
   const selected=s.answers[q.key];
   const phase=['global','wave','correction'].includes(q.key)?0:['local','pullback'].includes(q.key)?1:2;
-  return '<section class="card question-card"><div class="context-line"><span class="symbol">'+esc(s.symbol)+'</span><span class="pill neutral">1 мин</span><span class="pill neutral">Экспирация 5 мин</span></div><div class="step-strip">'+(s.schemeSnapshot?['Вопросы','Решение','Запись']:['Контекст','Сценарий','Условия','Запись']).map((x,i)=>'<span class="'+(i===(s.schemeSnapshot?0:phase)?'active':'')+'">'+x+'</span>'+(i<3?'<i></i>':'')).join('')+'</div><div class="eyebrow">Шаг '+(cursor+1)+' · '+esc(q.eyebrow)+'</div><h2 class="question-title" id="question-title" tabindex="-1">'+esc(q.title)+'</h2><p class="question-hint">'+esc(q.hint)+'</p>'+hintFigure(q)+(!s.schemeSnapshot&&q.key==='level'?'<div class="small-grid"><label class="field">Зона или уровень<input data-field="zone" value="'+esc(s.zone)+'" placeholder="Например, 80 000–80 020"></label><label class="field">Значимость прежней реакции<select data-field="zoneStrength"><option value="unknown" '+(s.zoneStrength==='unknown'?'selected':'')+'>Не оценена</option><option value="strong" '+(s.zoneStrength==='strong'?'selected':'')+'>Сильная / продолжительная</option><option value="ordinary" '+(s.zoneStrength==='ordinary'?'selected':'')+'>Обычная</option></select></label></div>':'')+'<div class="answers" role="radiogroup" aria-labelledby="question-title">'+q.options.map(o=>answerCard(q,o,selected)).join('')+'</div>'+'<footer class="question-footer"><button class="secondary" data-action="back" '+(cursor===0?'disabled':'')+'>← Назад</button></footer><p class="footnote">Ответ «не уверен» — полноценный результат наблюдения.</p></section>';
+  return '<section class="card question-card"><div class="context-line"><span class="symbol">'+esc(s.symbol)+'</span><span class="pill neutral">1 мин</span><span class="pill neutral">Экспирация 5 мин</span></div><div class="step-strip">'+(s.schemeSnapshot?['Вопросы','Решение','Запись']:['Контекст','Сценарий','Условия','Запись']).map((x,i)=>'<span class="'+(i===(s.schemeSnapshot?0:phase)?'active':'')+'">'+x+'</span>'+(i<3?'<i></i>':'')).join('')+'</div><div class="eyebrow">Шаг '+(cursor+1)+' · '+esc(q.eyebrow)+'</div><h2 class="question-title" id="question-title" tabindex="-1">'+esc(q.title)+'</h2><p class="question-hint">'+esc(q.hint)+'</p>'+hintFigure(q)+(!s.schemeSnapshot&&q.key==='level'?'<div class="small-grid"><label class="field">Зона или уровень<input data-field="zone" value="'+esc(s.zone)+'" placeholder="Например, 80 000–80 020"></label><label class="field">Значимость прежней реакции<select data-field="zoneStrength"><option value="unknown" '+(s.zoneStrength==='unknown'?'selected':'')+'>Не оценена</option><option value="strong" '+(s.zoneStrength==='strong'?'selected':'')+'>Сильная / продолжительная</option><option value="ordinary" '+(s.zoneStrength==='ordinary'?'selected':'')+'>Обычная</option></select></label></div>':'')+inheritedContext(s)+'<div class="answers" role="radiogroup" aria-labelledby="question-title">'+q.options.map(o=>answerCard(q,o,selected)).join('')+'</div>'+'<footer class="question-footer"><button class="secondary" data-action="back" '+(cursor===0&&!previousSchemeStages(s).length?'disabled':'')+'>← Назад</button></footer><p class="footnote">Ответ «не уверен» — полноценный результат наблюдения.</p></section>';
 }
 function resultCard(s){
   const e=s.decisionSnapshot?.conclusion||evaluationFor(s);
-  const r=routeFor(s);
+  const r=routeFor(s),transfer=schemeTransitionInfo(s,customSchemes);
   return '<section class="card question-card"><div class="context-line"><span class="symbol">'+esc(s.symbol)+'</span><span class="pill neutral">БО · 5 мин</span><span class="pill '+(e.kind==='matched'?'green':e.kind==='waiting'?'amber':'neutral')+'">'+(e.kind==='matched'?'Условия собраны':e.kind==='waiting'?'Ожидание':'Неясный участок')+'</span></div><div class="result-symbol '+e.kind+'">'+(e.kind==='matched'?'✓':e.kind==='waiting'?'Ⅱ':'?')+'</div><h2 class="result-title" id="result-title" tabindex="-1">'+esc(e.title)+'</h2><p class="result-reason">'+esc(e.reason)+'</p>'+(e.experimental?'<div class="info-banner" style="margin-top:16px">Ветка вверх — зеркальный черновик. Её результаты учитываются отдельно.</div>':'')+
-  '<div class="decision-list">'+r.steps.filter(q=>s.answers[q.key]).map(q=>'<div><span>'+esc(stepLabel(q))+'</span><strong>'+esc(optionLabel(q,s.answers[q.key]))+'</strong></div>').join('')+'</div>'+
-  (!s.decisionSnapshot?'<div class="result-buttons"><button class="primary" data-action="lock-trade">'+(e.kind==='matched'?'Зафиксировать сделку':'Сделка всё же состоялась')+'</button><button class="secondary" data-action="lock-observation">Сохранить без входа</button></div><p class="footnote">Фиксируем твои наблюдения. Приложение не определяет будущую цену.</p>':'<div class="result-buttons"><span class="pill '+(s.trade.executed?'green':'neutral')+'">'+(s.trade.executed?'Сделка записана':'Наблюдение без входа')+'</span><button class="text-button" data-action="nav" data-view="journal">Открыть журнал →</button></div>')+
+  inheritedContext(s)+'<div class="decision-list">'+r.steps.filter(q=>s.answers[q.key]).map(q=>'<div><span>'+esc(stepLabel(q))+'</span><strong>'+esc(optionLabel(q,s.answers[q.key]))+'</strong></div>').join('')+'</div>'+
+  schemeHandoff(s)+
+  (!s.decisionSnapshot?'<div class="result-buttons"><button class="'+(transfer?.available?'secondary':'primary')+'" data-action="lock-trade">'+(e.kind==='matched'?'Зафиксировать сделку':'Сделка всё же состоялась')+'</button><button class="secondary" data-action="lock-observation">Сохранить без входа</button></div><p class="footnote">Фиксируем твои наблюдения. Приложение не определяет будущую цену.</p>':'<div class="result-buttons"><span class="pill '+(s.trade.executed?'green':'neutral')+'">'+(s.trade.executed?'Сделка записана':'Наблюдение без входа')+'</span><button class="text-button" data-action="nav" data-view="journal">Открыть журнал →</button></div>')+
   (!s.decisionSnapshot?'<div style="margin-top:20px"><button class="text-button" data-action="back">← Вернуться к вопросам</button></div>':'<p class="version-note">Путь зафиксирован '+fmtDate(s.decisionSnapshot.at)+' · версия '+esc(s.schemeSnapshot?.revision??s.decisionSnapshot.algorithmVersion)+'</p>')+'</section>';
 }
-function field(label,key,value,placeholder='',type='text',extra=''){return '<label class="field '+extra+'">'+label+'<input type="'+type+'" data-trade="'+key+'" value="'+esc(value)+'" placeholder="'+placeholder+'" '+(['stake','payout','entryPrice','exitPrice'].includes(key)?'inputmode="decimal"':'')+'></label>';}
+function field(label,key,value,placeholder='',type='text',extra=''){return '<label class="field '+extra+'">'+label+'<input type="'+type+'" data-trade="'+key+'" value="'+esc(value)+'" placeholder="'+placeholder+'" '+(type==='datetime-local'?'step="1" ':'')+(['mode','externalId'].includes(key)?'maxlength="100" ':'')+(['stake','payout','entryPrice','exitPrice'].includes(key)?'inputmode="decimal"':'')+'></label>';}
 async function attachJournalImages(files){
   const owner=current(),picked=Array.from(files||[]);if(!picked.length)return;
   if(!owner)throw new Error('Сначала открой разбор');
@@ -129,8 +170,8 @@ async function attachJournalImages(files){
 }
 function detailCard(s){
   const t=s.trade,p=profit(s);
-  const fields=t.executed?'<div class="field-grid"><label class="field">Результат<select data-trade="outcome">'+Object.entries(outcomeLabels).map(([v,l])=>'<option value="'+v+'" '+(t.outcome===v?'selected':'')+'>'+l+'</option>').join('')+'</select></label>'+field('Время открытия · время браузера','entryTime',t.entryTime,'','datetime-local')+field('Цена открытия','entryPrice',t.entryPrice,'0,00')+field('Цена на экспирации','exitPrice',t.exitPrice,'0,00')+field('Сумма сделки, $','stake',t.stake,'0,00')+field('Полная выплата, $','payout',t.payout,'Включая возврат ставки')+'</div><div class="result-money"><span>Выплата минус ставка</span><strong>'+money(p)+'</strong></div>':'';
-  return '<section class="card note-card"><h3>'+(t.executed?'Исход сделки':'Комментарий к наблюдению')+'</h3>'+fields+'<label class="field">Инструмент<input data-field="symbol" value="'+esc(s.symbol)+'" maxlength="100" placeholder="BTC/USDT"></label><label class="field" style="margin-top:16px">Что увидел и что ожидал<textarea data-field="notes" maxlength="50000" placeholder="Коротко: почему рассматривал вход, что оставалось неясным…">'+esc(s.notes)+'</textarea></label><div class="journal-image-drop image-drop-zone" data-image-drop="journal" data-max-files="4" role="group" aria-label="Скриншоты разбора"><div class="image-drop-instruction"><span class="drop-idle">Перетащи изображение сюда или выбери файл</span><span class="drop-active">Отпусти файл, чтобы добавить изображение</span></div><div><label class="upload-label">＋ Прикрепить скриншоты<input id="screenshot-files" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple></label></div><div class="attachments">'+s.screenshots.map((im,i)=>'<div class="attachment"><img src="'+esc(im.data)+'" alt="'+esc(im.name)+'" data-action="image" data-index="'+i+'"><button class="remove-image" data-action="remove-image" data-index="'+i+'" aria-label="Убрать скриншот">×</button><span class="attachment-name">'+esc(im.name)+'</span></div>').join('')+'</div></div><div class="footer-actions"><button class="primary" data-action="save-result">'+(t.executed?'Сохранить результат':'Сохранить комментарий')+'</button><button class="text-button danger" data-action="delete" data-id="'+esc(s.id)+'">Удалить разбор</button></div><p class="version-note">До 4 скриншотов по 5 МБ. Записи остаются в этом браузере; резервная копия включает изображения.</p></section>';
+  const fields=t.executed?'<div class="field-grid"><label class="field">Результат<select data-trade="outcome">'+Object.entries(outcomeLabels).map(([v,l])=>'<option value="'+v+'" '+(t.outcome===v?'selected':'')+'>'+l+'</option>').join('')+'</select></label>'+field('Режим','mode',t.mode||'','Например, Sprint')+field('Время открытия','entryTime',t.entryTime,'','datetime-local')+field('Время закрытия','exitTime',t.exitTime||'','','datetime-local')+field('Цена открытия','entryPrice',t.entryPrice,'0,00')+field('Цена на экспирации','exitPrice',t.exitPrice,'0,00')+field('Сумма сделки, $','stake',t.stake,'0,00')+field('Полная выплата, $','payout',t.payout,'Включая возврат ставки')+field('Номер сделки','externalId',t.externalId||'','Номер из карточки сделки','text','wide')+'</div><div class="result-money"><span>Выплата минус ставка</span><strong>'+money(p)+'</strong></div>':'';
+  return '<section class="card note-card"><h3>'+(t.executed?'Исход сделки':'Комментарий к наблюдению')+ '</h3>'+tradeImport.panel(s)+fields+'<label class="field">Инструмент<input data-field="symbol" value="'+esc(s.symbol)+'" maxlength="100" placeholder="BTC/USDT"></label><label class="field" style="margin-top:16px">Что увидел и что ожидал<textarea data-field="notes" maxlength="50000" placeholder="Коротко: почему рассматривал вход, что оставалось неясным…">'+esc(s.notes)+'</textarea></label><div class="journal-image-drop image-drop-zone" data-image-drop="journal" data-max-files="4" role="group" aria-label="Скриншоты разбора"><div class="image-drop-instruction"><span class="drop-idle">Перетащи изображение сюда или выбери файл</span><span class="drop-active">Отпусти файл, чтобы добавить изображение</span></div><div><label class="upload-label">＋ Прикрепить скриншоты<input id="screenshot-files" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple></label></div><div class="attachments">'+s.screenshots.map((im,i)=>'<div class="attachment"><img src="'+esc(im.data)+'" alt="'+esc(im.name)+'" data-action="image" data-index="'+i+'"><button class="remove-image" data-action="remove-image" data-index="'+i+'" aria-label="Убрать скриншот">×</button><span class="attachment-name">'+esc(im.name)+'</span></div>').join('')+'</div></div><div class="footer-actions"><button class="primary" data-action="save-result">'+(t.executed?'Сохранить результат':'Сохранить комментарий')+'</button><button class="text-button danger" data-action="delete" data-id="'+esc(s.id)+'">Удалить разбор</button></div><p class="version-note">До 4 скриншотов по 5 МБ. Записи остаются в этом браузере; резервная копия включает изображения.</p></section>';
 }
 function journal(){
   return heading('Журнал решений','Ход рассуждений сохраняется вместе со сделкой и её исходом.','<button class="secondary" data-action="import">Импорт JSON</button>')+
@@ -145,7 +186,7 @@ function journalRows(){
   return '<div class="table-wrap"><table><thead><tr><th>Разбор</th><th>Ветка</th><th>Условия</th><th>Исход</th><th>Результат</th><th class="journal-actions">Действия</th></tr></thead><tbody>'+list.map(s=>{
     const e=s.decisionSnapshot?.conclusion||evaluationFor(s),a=s.decisionSnapshot?.answers||s.answers,p=profit(s);
     const status=s.trade.executed?outcomeLabels[s.trade.outcome]:s.disposition==='observation'?'Без входа':'Черновик';
-    return '<tr><td><strong>'+esc(s.symbol)+'</strong><small>'+fmtDate(s.createdAt)+'</small></td><td>'+esc(scenarioFor(s))+'<small>'+(s.schemeSnapshot?'Своя схема':a.local==='down'?'Локально вниз':a.local==='up'?'Локально вверх':'Направление не выбрано')+' · v'+esc(s.schemeSnapshot?.revision??s.algorithmVersion)+'</small></td><td><span class="pill '+(e.kind==='matched'?'green':e.kind==='waiting'?'amber':'neutral')+'">'+(e.kind==='matched'?'Отмечены':e.kind==='waiting'?'Ожидание':e.kind==='draft'?'В процессе':'Неясно')+'</span></td><td><span class="pill '+(s.trade.outcome==='win'?'green':s.trade.outcome==='loss'?'red':'neutral')+'">'+status+'</span></td><td>'+money(p)+'</td><td class="journal-actions"><div class="journal-row-actions"><button class="text-button" data-action="open" data-id="'+esc(s.id)+'">Открыть →</button><button class="text-button danger" data-action="delete" data-id="'+esc(s.id)+'" aria-label="Удалить запись: '+esc(s.symbol)+' · '+esc(fmtDate(s.createdAt))+'">Удалить</button></div></td></tr>';
+    return '<tr><td><strong>'+esc(s.symbol)+'</strong><small>'+fmtDate(s.createdAt)+'</small></td><td>'+esc(scenarioFor(s))+'<small>'+(s.schemeSnapshot?(previousSchemeStages(s).length?(previousSchemeStages(s).length+1)+' схем':'Своя схема'):a.local==='down'?'Локально вниз':a.local==='up'?'Локально вверх':'Направление не выбрано')+' · v'+esc(s.schemeSnapshot?.revision??s.algorithmVersion)+'</small></td><td><span class="pill '+(e.kind==='matched'?'green':e.kind==='waiting'?'amber':'neutral')+'">'+(e.kind==='matched'?'Отмечены':e.kind==='waiting'?'Ожидание':e.kind==='draft'?'В процессе':'Неясно')+'</span></td><td><span class="pill '+(s.trade.outcome==='win'?'green':s.trade.outcome==='loss'?'red':'neutral')+'">'+status+'</span></td><td>'+money(p)+'</td><td class="journal-actions"><div class="journal-row-actions"><button class="text-button" data-action="open" data-id="'+esc(s.id)+'">Открыть →</button><button class="text-button danger" data-action="delete" data-id="'+esc(s.id)+'" aria-label="Удалить запись: '+esc(s.symbol)+' · '+esc(fmtDate(s.createdAt))+'">Удалить</button></div></td></tr>';
   }).join('')+'</tbody></table></div>';
 }
 function statsPage(){
@@ -224,6 +265,7 @@ app.addEventListener('click',async event=>{
   const b=event.target.closest('[data-action]');if(!b||b.disabled)return;
   const s=current(),action=b.dataset.action;
   try{
+    if(['parse-trade-import','apply-trade-import','clear-trade-import'].includes(action)){await tradeImport.handleAction(b);return;}
     if(action==='nav'){await flush();view=b.dataset.view;location.hash=view;render();}
     else if(action==='delete-example'){
       const example=BUILTIN_EXAMPLES.find(e=>e.id===b.dataset.example);
@@ -241,7 +283,13 @@ app.addEventListener('click',async event=>{
     else if(action==='clear-journal-filter'){search='';filter='all';view='journal';render();}
     else if(action==='new')await createNew();
     else if(action==='answer'){event.preventDefault();selectAnswer(b.dataset.key,b.dataset.value);}
-    else if(action==='back'){cursor=Math.max(0,cursor-1);s.cursor=cursor;put(s);render();}
+    else if(action==='next-scheme')await navigateScheme(b);
+    else if(action==='return-scheme')await navigateScheme(b,Number(b.dataset.index));
+    else if(action==='back'){
+      if(!s||s.decisionSnapshot)return;
+      if(cursor===0&&previousSchemeStages(s).length)await navigateScheme({dataset:{sessionId:s.id}},previousSchemeStages(s).length-1);
+      else{cursor=Math.max(0,cursor-1);s.cursor=cursor;put(s);render();focusQuestion();}
+    }
     else if(action==='goto'){cursor=Number(b.dataset.index);s.cursor=cursor;put(s);render();}
     else if(action==='preset')await createNew({global:'down',wave:b.dataset.preset});
     else if(action==='open')await openRecord(b.dataset.id);
@@ -249,6 +297,7 @@ app.addEventListener('click',async event=>{
     else if(action==='save-result'){
       for(const key of ['stake','payout','entryPrice','exitPrice']){const value=s.trade[key];if(value!==''&&(decimal(value)===null||decimal(value)<0))throw new Error('Проверь числовые поля');}
       if(s.trade.stake!==''&&decimal(s.trade.stake)<=0)throw new Error('Сумма сделки должна быть больше нуля');
+      assertTradeMetadata(s.trade);
       put(s);if(!await flush())throw new Error('Не удалось сохранить запись в браузере');render();notify('Запись сохранена');
     }
     else if(action==='export')await exportAll();
@@ -265,6 +314,7 @@ app.addEventListener('click',async event=>{
 });
 app.addEventListener('change',async event=>{
   const el=event.target;
+  if(tradeImport.handleInput(el))return;
   if(el.hasAttribute('data-answer-image-file')){try{await builder.attachAnswerImages(el.files,el.dataset.optionId,el.dataset.replaceId);}catch(e){notify(e.message||'Не удалось добавить пример');}finally{el.value='';delete el.dataset.replaceId;}return;}
   if(el.id==='hint-image-file'){try{await builder.attachHintImages(el.files,el.dataset.replaceId);}catch(e){notify(e.message||'Не удалось добавить скриншот');}finally{el.value='';delete el.dataset.replaceId;}return;}if(el.dataset.builderField||el.dataset.nodeField||el.dataset.optionField){if(el.tagName==='SELECT')builder.handleInput(el);return;}const s=current();if(!s)return;
   if(el.name==='answer'){
@@ -278,6 +328,7 @@ app.addEventListener('change',async event=>{
 });
 app.addEventListener('input',event=>{
   const el=event.target,s=current();
+  if(tradeImport.handleInput(el))return;
   if(el.dataset.builderField||el.dataset.nodeField||el.dataset.optionField){if(el.tagName!=='SELECT')builder.handleInput(el);return;}
   if(el.id==='journal-search'){search=el.value;document.querySelector('#journal-list').innerHTML=journalRows();return;}
   if(!s)return;
